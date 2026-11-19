@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>gisl — WebGL2 wind field (starter)</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b1020; color: #d7deea; font: 14px/1.5 system-ui, sans-serif; }
+    #status { position: absolute; left: 16px; top: 16px; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="status">gisl starter: WebGL2 context check. Wind particles are not implemented yet.</div>
+  <canvas id="c"></canvas>
+  <script>
+    const canvas = document.getElementById('c');
+    const status = document.getElementById('status');
+    const gl = canvas.getContext('webgl2');
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.floor(canvas.clientWidth * dpr);
+      canvas.height = Math.floor(canvas.clientHeight * dpr);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    if (!gl) {
+      status.textContent = 'WebGL2 is not available in this browser.';
+    } else {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0.04, 0.06, 0.12, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+  </script>
+</body>
+</html>
