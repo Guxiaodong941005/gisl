@@ -3,34 +3,364 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>gisl — WebGL2 wind field (starter)</title>
+  <title>gisl — WebGL2 wind particles</title>
   <style>
-    html, body { margin: 0; height: 100%; background: #0b1020; color: #d7deea; font: 14px/1.5 system-ui, sans-serif; }
-    #status { position: absolute; left: 16px; top: 16px; }
+    html, body { margin: 0; height: 100%; background: #070b14; color: #d7deea; font: 13px/1.45 system-ui, sans-serif; }
     canvas { display: block; width: 100%; height: 100%; }
+    #hud {
+      position: absolute; left: 14px; top: 14px;
+      background: rgba(8, 12, 22, 0.72); border: 1px solid #243049;
+      border-radius: 8px; padding: 10px 12px; min-width: 240px;
+    }
+    #hud h1 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+    #hud p, #status { margin: 0 0 8px; color: #9aa8bd; }
+    label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0; }
+    select, input[type="range"] { width: 120px; }
   </style>
 </head>
 <body>
-  <div id="status">gisl starter: WebGL2 context check. Wind particles are not implemented yet.</div>
+  <div id="hud">
+    <h1>gisl</h1>
+    <p>New research demo: GPU wind particles in WebGL2.</p>
+    <div id="status">Starting…</div>
+    <label>Sampling
+      <select id="sampling">
+        <option value="bilinear" selected>bilinear</option>
+        <option value="bicubic">bicubic</option>
+      </select>
+    </label>
+    <label>Integrator
+      <select id="integrator">
+        <option value="rk4" selected>RK4</option>
+        <option value="euler">Euler</option>
+      </select>
+    </label>
+    <label>Speed <input id="speed" type="range" min="0.05" max="0.6" step="0.01" value="0.22" /></label>
+  </div>
   <canvas id="c"></canvas>
   <script>
-    const canvas = document.getElementById('c');
-    const status = document.getElementById('status');
-    const gl = canvas.getContext('webgl2');
-    function resize() {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.floor(canvas.clientWidth * dpr);
-      canvas.height = Math.floor(canvas.clientHeight * dpr);
+const UPDATE_VERT = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 aPos;
+void main() {
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const UPDATE_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D particleTex;
+uniform sampler2D windTex;
+uniform vec2 particleSize;
+uniform vec2 windSize;
+uniform float dt;
+uniform float timeFrac;
+uniform float speed;
+uniform float clock;
+uniform int useBicubic;
+uniform int useRk4;
+out vec4 fragColor;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+vec2 windAt(vec2 uv) {
+  vec2 halfTexel = 0.5 / windSize;
+  vec2 clamped = clamp(uv, halfTexel, 1.0 - halfTexel);
+  if (useBicubic == 0) {
+    vec4 w = texture(windTex, clamped);
+    return mix(w.rg, w.ba, timeFrac);
+  }
+  vec2 texSize = windSize;
+  vec2 coord = clamped * texSize - 0.5;
+  vec2 f = fract(coord);
+  vec2 base = floor(coord);
+  vec4 xcubic = vec4(f.x * f.x * f.x, f.x * f.x, f.x, 1.0);
+  vec4 ycubic = vec4(f.y * f.y * f.y, f.y * f.y, f.y, 1.0);
+  // Catmull-Rom
+  mat4 m = mat4(
+     0.0, 2.0, 0.0, 0.0,
+    -1.0, 0.0, 1.0, 0.0,
+     2.0,-5.0, 4.0,-1.0,
+    -1.0, 3.0,-3.0, 1.0
+  ) * 0.5;
+  vec4 xw = xcubic * m;
+  vec4 yw = ycubic * m;
+  vec2 sum = vec2(0.0);
+  float wsum = 0.0;
+  for (int j = -1; j <= 2; j++) {
+    for (int i = -1; i <= 2; i++) {
+      float wgt = xw[i + 1] * yw[j + 1];
+      vec2 s = (base + vec2(float(i), float(j)) + 0.5) / texSize;
+      s = clamp(s, halfTexel, 1.0 - halfTexel);
+      vec4 w = texture(windTex, s);
+      sum += mix(w.rg, w.ba, timeFrac) * wgt;
+      wsum += wgt;
     }
-    window.addEventListener('resize', resize);
-    resize();
-    if (!gl) {
-      status.textContent = 'WebGL2 is not available in this browser.';
-    } else {
-      gl.viewport(0, 0, canvas.width, canvas.height);
-      gl.clearColor(0.04, 0.06, 0.12, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  return sum / max(wsum, 1e-6);
+}
+
+vec2 advect(vec2 pos) {
+  if (useRk4 == 0) {
+    return pos + windAt(pos) * dt * speed;
+  }
+  vec2 k1 = windAt(pos);
+  vec2 k2 = windAt(pos + 0.5 * dt * speed * k1);
+  vec2 k3 = windAt(pos + 0.5 * dt * speed * k2);
+  vec2 k4 = windAt(pos + dt * speed * k3);
+  return pos + (dt * speed / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+}
+
+void main() {
+  vec2 id = gl_FragCoord.xy / particleSize;
+  vec4 p = texture(particleTex, id);
+  vec2 pos = p.xy;
+  float life = p.z - dt * 0.12;
+  pos = advect(pos);
+  if (life <= 0.0 || pos.x < 0.0 || pos.x > 1.0 || pos.y < 0.0 || pos.y > 1.0) {
+    pos = vec2(hash(id + clock), hash(id.yx + clock * 1.37));
+    life = 0.6 + hash(id + life) * 1.4;
+  }
+  fragColor = vec4(pos, life, 1.0);
+}`;
+
+const RENDER_VERT = `#version 300 es
+precision highp float;
+uniform sampler2D particleTex;
+uniform ivec2 particleSize;
+uniform vec2 resolution;
+out float vLife;
+void main() {
+  int w = particleSize.x;
+  ivec2 texel = ivec2(gl_VertexID % w, gl_VertexID / w);
+  vec4 p = texelFetch(particleTex, texel, 0);
+  vLife = p.z;
+  gl_Position = vec4(p.xy * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = mix(1.0, 2.2, clamp(p.z, 0.0, 1.0));
+}`;
+
+const RENDER_FRAG = `#version 300 es
+precision highp float;
+in float vLife;
+out vec4 fragColor;
+void main() {
+  vec2 d = gl_PointCoord - vec2(0.5);
+  float a = smoothstep(0.25, 0.0, dot(d, d)) * smoothstep(0.0, 0.35, vLife);
+  fragColor = vec4(0.65, 0.85, 1.0, a);
+}`;
+
+const BG_VERT = `#version 300 es
+layout(location=0) in vec2 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const BG_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D windTex;
+uniform float timeFrac;
+out vec4 fragColor;
+void main() {
+  vec4 w = texture(windTex, vUv);
+  vec2 vel = mix(w.rg, w.ba, timeFrac);
+  float mag = length(vel);
+  vec3 col = mix(vec3(0.05, 0.08, 0.14), vec3(0.12, 0.32, 0.48), smoothstep(0.0, 0.55, mag));
+  fragColor = vec4(col, 1.0);
+}`;
+
+const canvas = document.getElementById('c');
+const status = document.getElementById('status');
+const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
+if (!gl) {
+  status.textContent = 'WebGL2 is not available in this browser.';
+  throw new Error('WebGL2 required');
+}
+const floatBuf = gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float');
+if (!floatBuf) {
+  status.textContent = 'Need EXT_color_buffer_float or half_float for particle buffers.';
+  throw new Error('float color buffer required');
+}
+
+const WIND_W = 256, WIND_H = 128;
+const PART_W = 256, PART_H = 256;
+const PART_COUNT = PART_W * PART_H;
+
+function compile(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(sh));
+  }
+  return sh;
+}
+function program(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+function quad() {
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+  return buf;
+}
+
+function windAt(x, y, t) {
+  const u = 0.32 * Math.sin(2 * Math.PI * y) + 0.18 * Math.sin(2 * Math.PI * (x + t));
+  const v = 0.22 * Math.sin(4 * Math.PI * x) * Math.cos(2 * Math.PI * y) + 0.12 * Math.cos(2 * Math.PI * (y - t * 0.7));
+  return [u, v];
+}
+
+function makeWindTexture() {
+  const data = new Float32Array(WIND_W * WIND_H * 4);
+  for (let j = 0; j < WIND_H; j++) {
+    for (let i = 0; i < WIND_W; i++) {
+      const x = (i + 0.5) / WIND_W;
+      const y = (j + 0.5) / WIND_H;
+      const a = windAt(x, y, 0.0);
+      const b = windAt(x, y, 0.18);
+      const o = (j * WIND_W + i) * 4;
+      data[o] = a[0]; data[o+1] = a[1]; data[o+2] = b[0]; data[o+3] = b[1];
     }
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, WIND_W, WIND_H, 0, gl.RGBA, gl.FLOAT, data);
+  return tex;
+}
+
+function makeParticleTarget() {
+  const data = new Float32Array(PART_W * PART_H * 4);
+  for (let i = 0; i < PART_COUNT; i++) {
+    data[i*4] = Math.random();
+    data[i*4+1] = Math.random();
+    data[i*4+2] = Math.random() * 1.6 + 0.3;
+    data[i*4+3] = 1;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, PART_W, PART_H, 0, gl.RGBA, gl.FLOAT, data);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (!ok) throw new Error('Particle FBO incomplete');
+  return { tex, fbo };
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+}
+window.addEventListener('resize', resize);
+resize();
+
+const windTex = makeWindTexture();
+const targets = [makeParticleTarget(), makeParticleTarget()];
+let read = 0;
+const quadBuf = quad();
+const updateProg = program(UPDATE_VERT, UPDATE_FRAG);
+const renderProg = program(RENDER_VERT, RENDER_FRAG);
+const bgProg = program(BG_VERT, BG_FRAG);
+const emptyVAO = gl.createVertexArray();
+
+function bindQuad(prog) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  const loc = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+}
+
+const samplingSel = document.getElementById('sampling');
+const integratorSel = document.getElementById('integrator');
+const speedEl = document.getElementById('speed');
+let last = performance.now();
+let clock = 0;
+let timeFrac = 0;
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  clock += dt;
+  timeFrac = 0.5 + 0.5 * Math.sin(clock * 0.15);
+  resize();
+
+  const src = targets[read];
+  const dst = targets[read ^ 1];
+
+  gl.useProgram(updateProg);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+  gl.viewport(0, 0, PART_W, PART_H);
+  gl.disable(gl.BLEND);
+  bindQuad(updateProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, windTex);
+  gl.uniform1i(gl.getUniformLocation(updateProg, 'particleTex'), 0);
+  gl.uniform1i(gl.getUniformLocation(updateProg, 'windTex'), 1);
+  gl.uniform2f(gl.getUniformLocation(updateProg, 'particleSize'), PART_W, PART_H);
+  gl.uniform2f(gl.getUniformLocation(updateProg, 'windSize'), WIND_W, WIND_H);
+  gl.uniform1f(gl.getUniformLocation(updateProg, 'dt'), dt);
+  gl.uniform1f(gl.getUniformLocation(updateProg, 'timeFrac'), timeFrac);
+  gl.uniform1f(gl.getUniformLocation(updateProg, 'speed'), parseFloat(speedEl.value));
+  gl.uniform1f(gl.getUniformLocation(updateProg, 'clock'), clock);
+  gl.uniform1i(gl.getUniformLocation(updateProg, 'useBicubic'), samplingSel.value === 'bicubic' ? 1 : 0);
+  gl.uniform1i(gl.getUniformLocation(updateProg, 'useRk4'), integratorSel.value === 'rk4' ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  read ^= 1;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.03, 0.05, 0.08, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  gl.useProgram(bgProg);
+  bindQuad(bgProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, windTex);
+  gl.uniform1i(gl.getUniformLocation(bgProg, 'windTex'), 0);
+  gl.uniform1f(gl.getUniformLocation(bgProg, 'timeFrac'), timeFrac);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.useProgram(renderProg);
+  gl.bindVertexArray(emptyVAO);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, targets[read].tex);
+  gl.uniform1i(gl.getUniformLocation(renderProg, 'particleTex'), 0);
+  gl.uniform2i(gl.getUniformLocation(renderProg, 'particleSize'), PART_W, PART_H);
+  gl.uniform2f(gl.getUniformLocation(renderProg, 'resolution'), canvas.width, canvas.height);
+  gl.drawArrays(gl.POINTS, 0, PART_COUNT);
+  gl.bindVertexArray(null);
+  gl.disable(gl.BLEND);
+
+  requestAnimationFrame(frame);
+}
+
+status.textContent = PART_COUNT.toLocaleString() + ' particles · procedural u/v texture · ping-pong FBO';
+requestAnimationFrame(frame);
   </script>
 </body>
 </html>
